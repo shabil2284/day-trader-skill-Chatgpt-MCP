@@ -72,6 +72,7 @@ import argparse
 import datetime
 import gzip
 import json
+import math
 import os
 import re
 import sys
@@ -284,15 +285,58 @@ def chart_path(sym, rng, interval):
 
 def series_from_result(res):
     """A Yahoo chart result (v8 or one spark response) -> plain lists."""
-    q = ((res.get("indicators") or {}).get("quote") or [{}])[0] or {}
+    if not isinstance(res, dict):
+        raise ScanError("Yahoo chart result is not an object")
+    indicators = res.get("indicators") or {}
+    quote_rows = indicators.get("quote") if isinstance(indicators, dict) else None
+    q = quote_rows[0] if isinstance(quote_rows, list) and quote_rows else {}
+    if not isinstance(q, dict):
+        q = {}
     t = res.get("timestamp") or []
+    if not isinstance(t, list):
+        raise ScanError("Yahoo chart timestamps are not a list")
+    normalized_t = []
+    for value in t:
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+            raise ScanError("Yahoo chart contains an invalid candle timestamp")
+        normalized_t.append(int(value))
+    if len(set(normalized_t)) != len(normalized_t):
+        raise ScanError("Yahoo chart contains duplicate candle timestamps")
+    t = normalized_t
     n = len(t)
 
     def col(k):
         v = q.get(k)
-        return list(v) + [None] * (n - len(v)) if isinstance(v, list) else None
-    return {"t": list(t), "c": col("close") or [None] * n, "o": col("open"), "h": col("high"),
-            "l": col("low"), "v": col("volume"), "meta": res.get("meta") or {}}
+        if not isinstance(v, list):
+            return [None] * n if k == "close" else None
+        out = []
+        for value in (list(v)[:n] + [None] * max(0, n - len(v))):
+            if value is None or isinstance(value, bool):
+                out.append(None)
+                continue
+            try:
+                number = float(value)
+            except (TypeError, ValueError, OverflowError):
+                out.append(None)
+                continue
+            if not math.isfinite(number) or number < 0 or (k != "volume" and number == 0):
+                out.append(None)
+            elif k == "volume" and number != int(number):
+                out.append(None)
+            else:
+                out.append(int(number) if k == "volume" else number)
+        return out
+
+    meta = res.get("meta") or {}
+    if not isinstance(meta, dict):
+        meta = {}
+    out = {"t": t, "c": col("close"), "o": col("open"), "h": col("high"),
+           "l": col("low"), "v": col("volume"), "meta": meta}
+    if out["h"] is not None and out["l"] is not None:
+        for i, (high, low) in enumerate(zip(out["h"], out["l"])):
+            if high is not None and low is not None and high < low:
+                out["h"][i] = out["l"][i] = None
+    return out
 
 
 def parse_spark(text_or_doc, wanted=None):
@@ -310,7 +354,13 @@ def parse_spark(text_or_doc, wanted=None):
             continue
         ysym = item.get("symbol") or (resp[0].get("meta") or {}).get("symbol") or ""
         sym = (wanted or {}).get(ysym.upper(), ysym.upper().replace("-", "."))
-        out[sym] = series_from_result(resp[0])
+        try:
+            out[sym] = series_from_result(resp[0])
+        except ScanError as exc:
+            first = resp[0] if isinstance(resp[0], dict) else {}
+            meta = first.get("meta") or {}
+            out[sym] = {"t": [], "c": [], "o": [], "h": [], "l": [], "v": [],
+                        "meta": meta if isinstance(meta, dict) else {}, "data_error": str(exc)}
     if err and not out:
         raise ScanError("Yahoo spark: %s" % (err.get("description") or err.get("code") or err))
     return out
@@ -327,7 +377,10 @@ def parse_chart(text_or_doc, sym=""):
     if not res:
         err = chart.get("error") or {}
         raise ScanError("no data for %s: %s" % (sym, err.get("description", "unknown ticker")))
-    return series_from_result(res[0])
+    try:
+        return series_from_result(res[0])
+    except ScanError as exc:
+        raise ScanError("invalid Yahoo chart for %s: %s" % (sym, exc)) from None
 
 
 def _read_maybe_gz(path):
@@ -506,10 +559,16 @@ def daily_closes(series, now_utc):
     for ts, c in zip(series["t"], series["c"]):
         if c is None:
             continue
+        try:
+            c = float(c)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if not math.isfinite(c) or c <= 0:
+            continue
         d = ts_to_eastern(ts).date()
         if d > today or (d == today and not today_done):
             continue
-        out[d] = float(c)  # one bar a day: a late duplicate (the live tick) wins
+        out[d] = c  # duplicate dates collapse to one complete daily close
     return sorted(out.items())
 
 
@@ -539,36 +598,119 @@ def find_setups(closes):
                   "run_pct": run * 100, "range5_pct": rng5 * 100}
 
 
-def scan_daily(data, symbols, now_utc, min_price, min_volume):
-    """Pure. data = {SYM: series}. Returns (hits, counts, last_date)."""
+def scan_daily(data, symbols, now_utc, min_price, min_volume, diagnostics=None, failures=None):
+    """Pure. data = {SYM: series}. Returns (hits, counts, last_date).
+
+    Optional diagnostics receives one retrieval, freshness, liquidity and signal
+    record for every requested symbol without changing the established return
+    shape used by existing callers.
+    """
     hits, dates = [], {}
+    diagnostics = diagnostics if diagnostics is not None else []
+    failures = failures or {}
     counts = {"requested": len(symbols), "fetched": 0, "illiquid": 0, "short": 0, "scanned": 0}
     for sym in symbols:
         s = data.get(sym)
         if not s:
+            diagnostics.append({
+                "symbol": sym, "source": "Yahoo Finance", "retrieval": "failed",
+                "freshness": "unknown", "liquidity_pass": False,
+                "strategy_evaluated": False, "signals": [], "result": "unavailable",
+                "rejection_reason": failures.get(sym, "No chart data returned for symbol."),
+            })
             continue
         counts["fetched"] += 1
+        if s.get("data_error"):
+            diagnostics.append({
+                "symbol": sym, "source": "Yahoo Finance", "retrieval": "invalid_response",
+                "freshness": "unknown", "liquidity_pass": False,
+                "strategy_evaluated": False, "signals": [], "result": "invalid_data",
+                "rejection_reason": s["data_error"],
+            })
+            continue
         bars = daily_closes(s, now_utc)
         meta = s.get("meta") or {}
         price = meta.get("regularMarketPrice")
         if price is None and bars:
             price = bars[-1][1]
         vol = meta.get("regularMarketVolume")
-        if price is None or price < min_price or (min_volume > 0 and (vol is None or vol < min_volume)):
+        try:
+            price = float(price) if price is not None else None
+            if price is not None and (not math.isfinite(price) or price <= 0):
+                price = None
+        except (TypeError, ValueError):
+            price = None
+        try:
+            vol = int(vol) if vol is not None else None
+        except (TypeError, ValueError, OverflowError):
+            vol = None
+        last_day = bars[-1][0] if bars else None
+        raw_ts = None
+        if last_day is not None:
+            raw_ts = max((ts for ts in s.get("t", []) if ts_to_eastern(ts).date() == last_day), default=None)
+        diag = {
+            "symbol": sym, "source": "Yahoo Finance", "retrieval": "fetched",
+            "source_timestamp_utc": (
+                datetime.datetime.fromtimestamp(raw_ts, datetime.timezone.utc)
+                .isoformat(timespec="seconds").replace("+00:00", "Z") if raw_ts is not None else None
+            ),
+            "bar_date": last_day.isoformat() if last_day else None,
+            "freshness": (
+                "latest_completed_daily_bar" if last_day == to_eastern(now_utc).date()
+                else "previous_session_or_older" if last_day else "no_completed_daily_bar"
+            ),
+            "price": price, "volume": vol, "liquidity_pass": False,
+            "strategy_evaluated": False, "signals": [],
+            "result": "pending", "rejection_reason": None,
+        }
+        if not bars:
+            diag["result"] = "insufficient_market_data"
+            diag["rejection_reason"] = "No completed daily candles were returned."
+            diagnostics.append(diag)
             counts["illiquid"] += 1
             continue
+        if price is None or price < min_price:
+            diag["result"] = "rejected_liquidity"
+            diag["rejection_reason"] = (
+                "Price unavailable." if price is None else
+                f"Price ${price:.2f} is below the ${min_price:.2f} minimum."
+            )
+            diagnostics.append(diag)
+            counts["illiquid"] += 1
+            continue
+        if min_volume > 0 and (vol is None or vol < min_volume):
+            diag["result"] = "rejected_liquidity"
+            diag["rejection_reason"] = (
+                "Volume unavailable." if vol is None else
+                f"Volume {vol} is below the {min_volume} minimum."
+            )
+            diagnostics.append(diag)
+            counts["illiquid"] += 1
+            continue
+        diag["liquidity_pass"] = True
         if len(bars) < MIN_DAILY_BARS:
+            diag["result"] = "insufficient_market_data"
+            diag["rejection_reason"] = f"Only {len(bars)} completed daily candles; {MIN_DAILY_BARS} required."
             counts["short"] += 1
+            diagnostics.append(diag)
             continue
         counts["scanned"] += 1
+        diag["strategy_evaluated"] = True
         d_last = bars[-1][0]
         dates[d_last] = dates.get(d_last, 0) + 1
         closes = [c for _, c in bars]
         tags, nums = find_setups(closes)
+        diag["signals"] = tags
         if tags:
+            diag["result"] = "candidate"
+            diag["rejection_reason"] = None
             hits.append({"symbol": sym, "setups": tags, "price": round(closes[-1], 2),
                          "close_date": d_last.isoformat(), "rsi": round(nums["rsi"], 1),
                          "volume": int(vol) if vol is not None else None})
+        else:
+            diag["result"] = "no_signal"
+            diag["rejection_reason"] = "No existing strategy signal matched the completed daily candles."
+        diagnostics.append(diag)
     hits.sort(key=lambda h: (-(h["price"] * (h["volume"] or 0)), h["symbol"]))  # most dollars traded first
     last_date = max(dates, key=lambda d: (dates[d], d)) if dates else None
     counts["hits"] = len(hits)
@@ -684,7 +826,7 @@ def orb_window(now_utc, at, or_minutes, until, explicit_day=None):
 
 
 def scan_orb(stage1, symbols, day, cutoff, or_minutes, min_price=0.0, min_volume=0, confirm=None,
-             max_confirm=None):
+             max_confirm=None, diagnostics=None, source_failures=None):
     """stage1 = {SYM: series} with closes (spark or v8). confirm(sym) -> series with highs/lows
     (None = use the stage-1 series). With confirm and max_confirm, only the max_confirm most
     traded candidates (price x volume so far) are confirmed; the rest are counted as unconfirmed.
@@ -693,26 +835,85 @@ def scan_orb(stage1, symbols, day, cutoff, or_minutes, min_price=0.0, min_volume
     counts = {"requested": len(symbols), "fetched": 0, "unusable": 0, "illiquid": 0, "scanned": 0,
               "candidates": 0, "confirmed": 0, "unconfirmed": 0}
     hits, failed, cands = [], {}, []
+    diagnostics = diagnostics if diagnostics is not None else []
+    source_failures = source_failures or {}
+    detail = {}
     for sym in symbols:
         s = stage1.get(sym)
         if not s:
+            detail[sym] = {
+                "symbol": sym, "source": "Yahoo Finance", "retrieval": "failed",
+                "freshness": "unknown", "liquidity_pass": False,
+                "strategy_evaluated": False, "candidate": False, "signal": False,
+                "result": "unavailable",
+                "rejection_reason": source_failures.get(sym, "No intraday chart data returned for symbol."),
+            }
             continue
         counts["fetched"] += 1
+        if s.get("data_error"):
+            detail[sym] = {
+                "symbol": sym, "source": "Yahoo Finance", "retrieval": "invalid_response",
+                "freshness": "unknown", "liquidity_pass": False,
+                "strategy_evaluated": False, "candidate": False, "signal": False,
+                "result": "invalid_data", "rejection_reason": s["data_error"],
+            }
+            continue
         bars = session_bars(s, day, cutoff)
+        last_close_et = (
+            (bars[-1]["start"] + datetime.timedelta(minutes=BAR_MIN)).isoformat(timespec="minutes") + " ET"
+            if bars else None
+        )
+        freshness = "unknown"
+        if bars:
+            bar_close = bars[-1]["start"] + datetime.timedelta(minutes=BAR_MIN)
+            age_minutes = max(0, int((cutoff - bar_close).total_seconds() // 60))
+            freshness = "within_one_bar_of_cutoff" if age_minutes <= BAR_MIN else "stale_at_cutoff"
+        diag = {
+            "symbol": sym, "source": "Yahoo Finance", "retrieval": "fetched",
+            "last_bar_close_et": last_close_et,
+            "freshness": freshness, "age_minutes_at_cutoff": age_minutes if bars else None,
+            "provider_delay_known": False,
+            "liquidity_pass": False, "strategy_evaluated": False,
+            "candidate": False, "signal": False, "result": "pending", "rejection_reason": None,
+        }
+        detail[sym] = diag
         if not usable(bars, day, cutoff, n_range):
             counts["unusable"] += 1
+            diag["result"] = "insufficient_market_data"
+            diag["rejection_reason"] = "Required completed 5-minute candles are missing or off-grid."
             continue
         vol = sum(b["v"] for b in bars) if s.get("v") else (s.get("meta") or {}).get("regularMarketVolume") or 0
         if bars[-1]["c"] < min_price or vol < min_volume:
             counts["illiquid"] += 1
+            diag["result"] = "rejected_liquidity"
+            diag["price"] = bars[-1]["c"]
+            diag["volume"] = vol
+            diag["rejection_reason"] = (
+                f"Price ${bars[-1]['c']:.2f} is below the ${min_price:.2f} minimum."
+                if bars[-1]["c"] < min_price else
+                f"Volume {vol} is below the {min_volume} minimum."
+            )
             continue
         counts["scanned"] += 1
+        diag["price"] = bars[-1]["c"]
+        diag["volume"] = vol
+        diag["liquidity_pass"] = True
+        diag["strategy_evaluated"] = True
         if orb_candidate(bars, n_range):
+            diag["candidate"] = True
+            diag["result"] = "candidate"
             cands.append((sym, bars, bars[-1]["c"] * vol))
+        else:
+            diag["result"] = "no_signal"
+            diag["rejection_reason"] = "No opening-range breakout candidate matched the existing strategy."
     counts["candidates"] = len(cands)
     if confirm is not None and max_confirm and len(cands) > max_confirm:
         cands.sort(key=lambda x: -x[2])
         counts["unconfirmed"] = len(cands) - max_confirm
+        for sym, _, _ in cands[max_confirm:]:
+            detail[sym]["result"] = "unconfirmed"
+            detail[sym]["rejection_reason"] = "Candidate not confirmed because the configured confirmation limit was reached."
+            detail[sym]["confirmation"] = "not_attempted_limit"
         cands = cands[:max_confirm]
     for sym, bars, _ in cands:
         full = bars
@@ -721,19 +922,33 @@ def scan_orb(stage1, symbols, day, cutoff, or_minutes, min_price=0.0, min_volume
                 s2 = confirm(sym)
             except ScanError as e:
                 failed[sym] = str(e)
+                detail[sym]["result"] = "confirmation_failed"
+                detail[sym]["confirmation"] = "failed"
+                detail[sym]["rejection_reason"] = str(e)
                 continue
             full = session_bars(s2, day, cutoff)
             if not usable(full, day, cutoff, n_range):
                 failed[sym] = "the v8 chart has a missing bar"
+                detail[sym]["result"] = "insufficient_market_data"
+                detail[sym]["confirmation"] = "failed"
+                detail[sym]["rejection_reason"] = failed[sym]
                 continue
         counts["confirmed"] += 1
+        detail[sym]["confirmation"] = "confirmed"
         h = orb_hit(full, n_range)
         if h:
+            detail[sym]["result"] = "candidate"
+            detail[sym]["signal"] = True
+            detail[sym]["rejection_reason"] = None
             hits.append(dict({"symbol": sym, "setups": ["orb"]}, **h))
+        elif detail[sym].get("rejection_reason") is None:
+            detail[sym]["result"] = "no_signal"
+            detail[sym]["rejection_reason"] = "Candidate failed confirmation against real high and low data."
     hits.sort(key=lambda x: (x["_t"], x["symbol"]))
     for h in hits:
         del h["_t"]
     counts["hits"] = len(hits)
+    diagnostics.extend(detail[sym] for sym in symbols)
     return hits, counts, failed
 
 
@@ -892,19 +1107,42 @@ def cmd_daily(a):
         progress(a, "Fetching daily closes for %s symbols (%d spark requests)..."
                  % ("{:,}".format(len(symbols)), (len(symbols) + SPARK_MAX - 1) // SPARK_MAX))
         data, failed = fetch_spark(symbols, "3mo", "1d", a.pause, a)
-    hits, counts, last_date = scan_daily(data, symbols, now, a.min_price, a.min_volume)
+    diagnostics = []
+    hits, counts, last_date = scan_daily(
+        data, symbols, now, a.min_price, a.min_volume, diagnostics=diagnostics, failures=failed
+    )
     nfailed = len(symbols) - counts["fetched"]
     as_of = ("%s close" % last_date.isoformat()) if last_date else None
+    invalid_data = sum(d.get("result") == "invalid_data" for d in diagnostics)
+    if counts["fetched"] == 0 and symbols:
+        scan_status = "insufficient_market_data" if a.offline else "provider_failure"
+    elif invalid_data and counts["fetched"] <= invalid_data:
+        scan_status = "insufficient_market_data"
+    elif nfailed or invalid_data:
+        scan_status = "partial"
+    elif counts["scanned"] == 0 and counts["short"]:
+        scan_status = "insufficient_market_data"
+    elif hits:
+        scan_status = "success_with_candidates"
+    else:
+        scan_status = "success_zero_candidates"
     doc = {"created_by": "trader-scanner", "created_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "mode": "daily",
            "as_of": as_of, "universe": len(symbols), "scanned": counts["scanned"], "failed": nfailed,
-           "source": "yahoo", "filters": {"min_price": a.min_price, "min_volume": a.min_volume},
-           "note": NOTE, "hits": hits}
+           "source": "yahoo", "provider_name": "Yahoo Finance", "real_time": False,
+           "scan_status": scan_status,
+           "data_timing": "latest completed daily close; may be from the previous session",
+           "filters": {"min_price": a.min_price, "min_volume": a.min_volume},
+           "note": NOTE, "hits": hits, "symbol_diagnostics": diagnostics}
     if a.offline:
         doc["offline"] = os.path.basename(a.offline.rstrip("/"))
     if not a.no_write:
         write_json(a.out, doc)
     if a.json:
         print(json.dumps(dict(doc, counts=counts, seconds=round(time.time() - t0, 1)), indent=2))
+        if scan_status in {"provider_failure", "insufficient_market_data"}:
+            return 2
+        if scan_status == "partial":
+            return 2
         return 0 if hits else 1
     local = to_eastern(now)
     print("Daily scan, %s ET, closes through %s (Yahoo spark, daily closes only)." % (
@@ -931,6 +1169,8 @@ def cmd_daily(a):
     if not a.no_write:
         print("Wrote %s (mode daily, %d hit%s)." % (a.out, len(hits), "" if len(hits) == 1 else "s"))
     print(NOTE + " Next: pick one chart, then /trader-news TICKER.")
+    if scan_status in {"provider_failure", "insufficient_market_data", "partial"}:
+        return 2
     return 0 if hits else 1
 
 
@@ -977,23 +1217,45 @@ def cmd_orb(a):
             if len(done) % 50 == 0:
                 progress(a, "  stage 2: %d v8 charts so far" % len(done))
             return parse_chart(yahoo_get(chart_path(sym, rng, "%dm" % BAR_MIN)), sym)
-    hits, counts, failed2 = scan_orb(data, symbols, day, cutoff, a.or_minutes, a.min_price, a.min_volume, confirm,
-                                     a.max_confirm)
+    diagnostics = []
+    hits, counts, failed2 = scan_orb(
+        data, symbols, day, cutoff, a.or_minutes, a.min_price, a.min_volume, confirm,
+        a.max_confirm, diagnostics=diagnostics, source_failures=failed,
+    )
     failed = dict(failed or {})
     failed.update(failed2)
     nfailed = len([s for s in symbols if s in failed])
     as_of = "%s %s ET" % (day.isoformat(), cutoff.strftime("%H:%M"))
+    invalid_data = sum(d.get("result") == "invalid_data" for d in diagnostics)
+    if counts["fetched"] == 0 and symbols:
+        scan_status = "insufficient_market_data" if a.offline else "provider_failure"
+    elif invalid_data and counts["fetched"] <= invalid_data:
+        scan_status = "insufficient_market_data"
+    elif nfailed or counts["unconfirmed"] or invalid_data:
+        scan_status = "partial"
+    elif counts["scanned"] == 0 and counts["unusable"]:
+        scan_status = "insufficient_market_data"
+    elif hits:
+        scan_status = "success_with_candidates"
+    else:
+        scan_status = "success_zero_candidates"
     doc = {"created_by": "trader-scanner", "created_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "mode": "orb",
            "as_of": as_of, "universe": len(symbols), "scanned": counts["scanned"], "failed": nfailed,
-           "unconfirmed": counts["unconfirmed"], "source": "yahoo", "or_minutes": a.or_minutes,
+           "unconfirmed": counts["unconfirmed"], "source": "yahoo", "provider_name": "Yahoo Finance",
+           "real_time": False, "scan_status": scan_status,
+           "data_timing": "5-minute bars through the requested cutoff; provider delay is not independently known",
+           "or_minutes": a.or_minutes,
            "interval": "%dm" % BAR_MIN,
-           "filters": {"min_price": a.min_price, "min_volume": a.min_volume}, "note": NOTE, "hits": hits}
+           "filters": {"min_price": a.min_price, "min_volume": a.min_volume}, "note": NOTE, "hits": hits,
+           "symbol_diagnostics": diagnostics}
     if a.offline:
         doc["offline"] = os.path.basename(a.offline.rstrip("/"))
     if not a.no_write:
         write_json(a.out, doc)
     if a.json:
         print(json.dumps(dict(doc, counts=counts, seconds=round(time.time() - t0, 1)), indent=2))
+        if scan_status in {"provider_failure", "insufficient_market_data", "partial"}:
+            return 2
         return 0 if hits else 1
     print("Opening-range breakout scan, %s %s ET: %d-minute range (9:30 to %s), 5-minute bars, Yahoo."
           % (day_label(day), clock_label(cutoff), a.or_minutes, clock_label(slot(day, a.or_minutes // BAR_MIN))))
@@ -1020,11 +1282,26 @@ def cmd_orb(a):
     if not a.no_write:
         print("Wrote %s (mode orb, %d hit%s)." % (a.out, len(hits), "" if len(hits) == 1 else "s"))
     print(NOTE + " Next: pick one chart, then /trader-news TICKER and /trader-entry TICKER.")
+    if scan_status in {"provider_failure", "insufficient_market_data", "partial"}:
+        return 2
     return 0 if hits else 1
 
 
 def _p(x):
     return "{:,.2f}".format(x)
+
+
+def _scan_error_type(message):
+    low = str(message).lower()
+    if "market is closed" in low or "no session" in low or "market closed" in low:
+        return "market_closed"
+    if any(term in low for term in ("could not reach", "http 429", "http 5", "rate limit", "yahoo answered", "answered http")):
+        return "provider_failure"
+    if any(term in low for term in ("no symbols", "universe", "symbol directory", "nasdaqtrader", "nasdaqlisted")):
+        return "invalid_universe"
+    if any(term in low for term in ("missing bar", "insufficient", "not enough", "no completed daily", "no data from")):
+        return "insufficient_market_data"
+    return "invalid_input"
 
 
 def main(argv=None):
@@ -1072,8 +1349,13 @@ def main(argv=None):
     try:
         return {"universe": cmd_universe, "daily": cmd_daily, "orb": cmd_orb}[a.cmd](a)
     except ScanError as e:
-        print("scan.py: %s" % e, file=sys.stderr)
-        return 1
+        error_type = _scan_error_type(e)
+        if a.json:
+            print(json.dumps({"ok": False, "scan_status": error_type, "error": str(e),
+                              "source": "yahoo", "provider_name": "Yahoo Finance", "real_time": False}))
+        else:
+            print("scan.py: %s" % e, file=sys.stderr)
+        return 2
     except KeyboardInterrupt:
         print("scan.py: stopped", file=sys.stderr)
         return 1

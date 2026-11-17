@@ -1,0 +1,16 @@
+# Dockerfile for MCP servers
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y git curl && rm -rf /var/lib/apt/lists/*
+
+# Pin the SDK used by both active servers to the same tested release.
+RUN pip install --no-cache-dir "mcp[cli]==1.26.0"
+
+# Copy project files
+COPY . .
+
+EXPOSE 8000
+EXPOSE 8001

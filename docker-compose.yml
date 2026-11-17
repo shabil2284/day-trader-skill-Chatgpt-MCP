@@ -1,0 +1,89 @@
+services:
+  analysis-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile.mcp
+    command: ["python3", "chatgpt-mcp/server.py"]
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - "./.env:/app/.env:ro"
+      - "./chatgpt-mcp/state:/app/chatgpt-mcp/state"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import socket; s = socket.create_connection(('127.0.0.1', 8000), timeout=3); s.close()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+    environment:
+      - CONTROL_PLANE_API_KEY=${CONTROL_PLANE_API_KEY}
+      - ALPACA_PAPER_TRADING_ENABLED=true
+      - ALPACA_ORDER_SUBMISSION_ENABLED=true
+      - ALPACA_LIVE_TRADING_ENABLED=false
+      - SEC_USER_AGENT=${SEC_USER_AGENT:-}
+
+  execution-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile.mcp
+    command: ["python3", "chatgpt-mcp/execution_server.py"]
+    ports:
+      - "127.0.0.1:8001:8001"
+    volumes:
+      - "./.env:/app/.env:ro"
+      - "./chatgpt-mcp/state:/app/chatgpt-mcp/state"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import socket; s = socket.create_connection(('127.0.0.1', 8001), timeout=3); s.close()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+    environment:
+      - CONTROL_PLANE_API_KEY=${CONTROL_PLANE_API_KEY}
+      - ALPACA_PAPER_TRADING_ENABLED=true
+      - ALPACA_ORDER_SUBMISSION_ENABLED=true
+      - ALPACA_LIVE_TRADING_ENABLED=false
+
+  analysis-tunnel:
+    image: ghcr.io/openai/tunnel-client:v0.0.20
+    depends_on:
+      analysis-mcp:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8080:8080"
+    restart: unless-stopped
+    environment:
+      - CONTROL_PLANE_API_KEY=${CONTROL_PLANE_API_KEY}
+      - ALPACA_PAPER_TRADING_ENABLED=true
+      - ALPACA_ORDER_SUBMISSION_ENABLED=true
+      - ALPACA_LIVE_TRADING_ENABLED=false
+      - CONTROL_PLANE_TUNNEL_ID=${ANALYSIS_TUNNEL_ID}
+      - MCP_SERVER_URL=http://analysis-mcp:8000/mcp
+      - HEALTH_LISTEN_ADDR=:8080
+
+  execution-tunnel:
+    image: ghcr.io/openai/tunnel-client:v0.0.20
+    depends_on:
+      execution-mcp:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8081:8081"
+    restart: unless-stopped
+    environment:
+      - CONTROL_PLANE_API_KEY=${CONTROL_PLANE_API_KEY}
+      - ALPACA_PAPER_TRADING_ENABLED=true
+      - ALPACA_ORDER_SUBMISSION_ENABLED=true
+      - ALPACA_LIVE_TRADING_ENABLED=false
+      - CONTROL_PLANE_TUNNEL_ID=${EXECUTION_TUNNEL_ID}
+      - MCP_SERVER_URL=http://execution-mcp:8001/mcp
+      - HEALTH_LISTEN_ADDR=:8081

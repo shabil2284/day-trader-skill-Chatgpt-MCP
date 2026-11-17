@@ -1,0 +1,1 @@
+configure tunnel-client: parse config file /Users/shabil/.config/tunnel-client/day-trader-final.yaml: invalid control_plane.api_key reference "env:CONTROL_PLANE_API_KEY": environment variable "CONTROL_PLANE_API_KEY" is not set

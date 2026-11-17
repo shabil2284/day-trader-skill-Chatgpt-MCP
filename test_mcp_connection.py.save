@@ -1,0 +1,26 @@
+ncio
+from mcp.client.session import ClientSession
+from mcp.client.sse import sse_client
+import httpx
+import traceback
+
+async def test_mcp_init(url):
+    print(f"Testing {url}...")
+    try:
+        async with httpx.AsyncClient() as client:
+            async with sse_client(url) as (read_stream, write_stream):
+                session = ClientSession(read_stream, write_stream)
+                await session.initialize()
+                print(f"✅ {url} initialization succeeded.")
+                return True
+    except Exception as e:
+        print(f"❌ {url} failed: {e}")
+        traceback.print_exc()
+        return False
+
+async def main():
+    await test_mcp_init("http://analysis-mcp:8000/mcp")
+    await test_mcp_init("http://execution-mcp:8001/mcp")
+
+if __name__ == "__main__":
+    asyncio.run(main())

@@ -100,6 +100,19 @@ class TheReel(unittest.TestCase):
         self.assertEqual(res["date"], TODAY)
         self.assertIs(res["paper"], True)
 
+    def test_gateway_bracket_payload_passes_with_fresh_price_during_session(self):
+        now = at("2026-11-16 10:15")
+        res = check.check(
+            [bracket("AAPL", 1, 50.00, 49.00, 52.00)],
+            cfg(),
+            prices={"AAPL": 50.00},
+            now=now,
+            price_times={"AAPL": now},
+        )
+        self.assertEqual(verdicts(res), ["PASS"], res["results"][0]["reasons"])
+        self.assertEqual(res["results"][0]["max_loss"], 1.00)
+        self.assertEqual(res["results"][0]["reward_risk"], 2.0)
+
     def test_nine_shares_is_blocked_by_the_max_loss_only(self):
         res = check.check([tsla(qty="9")], cfg(), now=at(NOW))
         self.assertEqual(verdicts(res), ["BLOCK"])

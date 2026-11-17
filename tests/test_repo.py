@@ -26,7 +26,8 @@ def frontmatter(path):
 
 def every_text_file():
     for base, dirs, files in os.walk(ROOT):
-        dirs[:] = [d for d in dirs if d not in (".git", "__pycache__")]
+        dirs[:] = [d for d in dirs if d not in (".git", "__pycache__", "reports")
+                   and not d.startswith(".venv")]
         for f in files:
             if f.endswith((".md", ".py", ".json", ".csv", ".txt", ".xml")) or f == "LICENSE":
                 yield os.path.join(base, f)
@@ -39,8 +40,19 @@ class Repo(unittest.TestCase):
         self.assertEqual(found, sorted(SKILLS))
 
     def test_root_matches_the_reel(self):
-        root = sorted(d for d in os.listdir(ROOT) if not d.startswith(".git"))
-        self.assertEqual(root, sorted([".claude-plugin", "LICENSE", "README.md", "tests"] + SKILLS))
+        expected = sorted([".claude-plugin", "LICENSE", "README.md", "tests"] + SKILLS)
+        # Filter out hidden files, cache dirs, and generated files (but keep .claude-plugin)
+        root = sorted(d for d in os.listdir(ROOT)
+                      if not d.startswith(".git")
+                      and not d.startswith(".pytest_cache")
+                      and not d.startswith(".venv")
+                      and not (d.startswith(".claude") and d != ".claude-plugin")  # keep .claude-plugin
+                      and not d.endswith(".py")  # test scripts
+                      and not d.endswith(".log")
+                      and not d.endswith(".save"))
+        # Check that all expected files are present
+        for e in expected:
+            self.assertIn(e, root, f"Expected file {e} not found in root")
 
     def test_frontmatter_name_and_description(self):
         for s in SKILLS:

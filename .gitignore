@@ -1,0 +1,27 @@
+.env
+
+# Python environments and generated files
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.DS_Store
+
+# Local trading configuration and state
+trader/config.json
+trader/portfolio.json
+trader/orders.json
+trader/plan.json
+trader/prices.json
+trader/watchlist.json
+trader/alerts.json
+trader/state/
+
+# MCP local backups
+chatgpt-mcp/*.backup
+
+# MCP local backups
+chatgpt-mcp/*.backup
+
+chatgpt-mcp/order_state.json
+.env.save

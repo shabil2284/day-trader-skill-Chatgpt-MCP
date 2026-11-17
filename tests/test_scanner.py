@@ -162,6 +162,28 @@ class Spark(unittest.TestCase):
         with self.assertRaises(scan.ScanError):
             scan.parse_spark('{"chart":{}}')
 
+    def test_chart_parser_rejects_duplicate_timestamps_and_normalizes_bad_ohlcv(self):
+        duplicate = {
+            "timestamp": [1, 1],
+            "indicators": {"quote": [{"close": [10, 11]}]},
+        }
+        with self.assertRaisesRegex(scan.ScanError, "duplicate candle timestamps"):
+            scan.series_from_result(duplicate)
+
+        result = scan.series_from_result({
+            "timestamp": [1, 2, 3],
+            "indicators": {"quote": [{
+                "open": [10, 10, 10], "high": [9, 12, 12],
+                "low": [10, 8, 10], "close": [10, float("nan"), 11, 99],
+                "volume": [20, -1, 30],
+            }]},
+        })
+        self.assertEqual(result["t"], [1, 2, 3])
+        self.assertEqual(result["c"], [10.0, None, 11.0])
+        self.assertEqual(result["h"][0], None)  # inconsistent high/low removed
+        self.assertEqual(result["l"][0], None)
+        self.assertEqual(result["v"], [20, None, 30])
+
     def test_urls(self):
         self.assertEqual(scan.spark_path(["BRK.B", "tsla"], "3mo", "1d"),
                          "/v7/finance/spark?symbols=BRK-B,TSLA&range=3mo&interval=1d")
@@ -502,18 +524,22 @@ class Cli(unittest.TestCase):
         # daily over that universe with the fixture charts: only KO and TSLA are in both, so partial
         code, text, _ = run(["daily", "--universe", uni, "--offline", DAILY, "--now", "2026-10-19 09:00",
                              "--out", self.wl, "--min-volume", "0"])
-        self.assertEqual(code, 0)
+        self.assertEqual(code, 2)
         self.assertIn("Fetched 2 of 17 charts (15 failed or had no data)", text)
         doc = self.read(self.wl)
         self.assertEqual((doc["mode"], doc["universe"], doc["scanned"], doc["failed"]), ("daily", 17, 2, 15))
         self.assertEqual(doc["hits"], [{"symbol": "KO", "setups": ["breakout_20d"], "price": 93.9,
                                         "close_date": "2026-10-16", "rsi": 75.3, "volume": 3680307}])
         self.assertEqual(doc["as_of"], "2026-10-16 close")
+        self.assertEqual(doc["scan_status"], "partial")
+        self.assertEqual(doc["provider_name"], "Yahoo Finance")
+        self.assertFalse(doc["real_time"])
+        self.assertEqual(len(doc["symbol_diagnostics"]), 17)
 
         # the reel's 10:15 scan
         code, text, _ = run(["orb", "--offline", WALL, "--now", "2026-10-19 10:15", "--min-price", "0",
                              "--out", self.wl])
-        self.assertEqual(code, 0)
+        self.assertEqual(code, 2)
         self.assertIn("42 of 231 charts closed above their opening-range high by 10:15 AM", text)
         self.assertIn("10:15 AM  TSLA      $364.18  range 354.47 to 362.18  +0.55% over", text)
         self.assertIn("not a list of stocks to buy", text)
@@ -522,6 +548,7 @@ class Cli(unittest.TestCase):
                                               "source")},
                          {"created_by": "trader-scanner", "created_at": "2026-10-19T14:15:00Z", "mode": "orb",
                           "as_of": "2026-10-19 10:15 ET", "universe": 234, "scanned": 231, "source": "yahoo"})
+        self.assertEqual(doc["scan_status"], "partial")
         self.assertEqual(len(doc["hits"]), 42)
         self.assertIn({"symbol": "TSLA", "setups": ["orb"], "price": 364.18, "at": "10:15 AM", "bar_start": "10:10",
                        "bar_index": 8, "or_high": 362.18, "or_low": 354.47, "pct_over": 0.55}, doc["hits"])
@@ -560,7 +587,7 @@ class Cli(unittest.TestCase):
                                  "--max-confirm", "10", "--no-write"])
         finally:
             scan.yahoo_get, scan.SLEEP, scan.parse_now = old_get, old_sleep, real_now
-        self.assertEqual(code, 0)
+        self.assertEqual(code, 2)
         self.assertIn("231 usable; 95 candidates, 10 confirmed", text)
         self.assertIn("PARTIAL: 85 more candidates were not checked", text)
         self.assertIn("5 of the 10 checked charts closed above their opening-range high by 10:15 AM", text)
@@ -570,7 +597,7 @@ class Cli(unittest.TestCase):
 
     def test_plain_messages_and_exit_codes(self):
         code, _, err = run(["orb", "--offline", WALL, "--now", "2026-10-17 10:15", "--out", self.wl])
-        self.assertEqual(code, 1)
+        self.assertEqual(code, 2)
         self.assertIn("No session on Sat 2026-10-17 (weekend)", err)
         self.assertNotIn("Traceback", err)
         self.assertFalse(os.path.exists(self.wl))
@@ -581,9 +608,10 @@ class Cli(unittest.TestCase):
         with open(cfg, "w") as fh:
             json.dump({"no_entries_after": "10:00"}, fh)
         code, _, err = run(["orb", "--offline", WALL, "--now", "2026-10-19 10:15", "--config", cfg])
-        self.assertEqual(code, 1)
+        self.assertEqual(code, 2)
         self.assertIn("expired", err)
         code, _, err = run(["orb", "--offline", WALL])
+        self.assertEqual(code, 2)
         self.assertIn("--at HH:MM", err)
         code, text, _ = run(["orb", "--offline", WALL, "--now", "2026-10-19 10:10", "--symbols", "TSLA",
                              "--out", self.wl])
@@ -591,15 +619,16 @@ class Cli(unittest.TestCase):
         self.assertIn("No chart closed above its opening-range high by 10:10 AM", text)
         self.assertEqual(self.read(self.wl)["hits"], [])
         code, _, err = run(["daily", "--universe", os.path.join(self.d, "nope.txt")])
-        self.assertEqual(code, 1)
+        self.assertEqual(code, 2)
         self.assertIn("scan.py universe", err)
         code, _, err = run(["daily", "--offline", os.path.join(self.d, "nothing-here")])
+        self.assertEqual(code, 2)
         self.assertIn("no offline file", err)
         empty = os.path.join(self.d, "empty.json")
         with open(empty, "w") as fh:
             fh.write("{}")
         code, _, err = run(["daily", "--offline", empty])
-        self.assertEqual(code, 1)
+        self.assertEqual(code, 2)
         self.assertIn("no symbols to scan", err)
 
     def test_offline_folder_of_v8_files(self):
@@ -614,7 +643,8 @@ class Cli(unittest.TestCase):
         out = json.loads(text)
         self.assertEqual((out["universe"], out["scanned"], out["failed"]), (4, 3, 1))
         self.assertEqual([h["symbol"] for h in out["hits"]], ["AAPL", "TSLA"])
-        self.assertEqual(code, 0)
+        self.assertEqual(code, 2)
+        self.assertEqual(out["scan_status"], "partial")
 
     def test_symbol_lists(self):
         txt = os.path.join(self.d, "list.txt")
