@@ -1,4 +1,9 @@
-# The Day Trader skill
+# 📈 The Day Trader skill
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.x](https://img.shields.io/badge/Python-3.x-blue.svg)](https://www.python.org/)
+[![Paper Trading Safe](https://img.shields.io/badge/Paper%20Trading-Safe-green.svg)](#)
+[![11 Skills](https://img.shields.io/badge/11%20Skills-blue.svg)](#)
 
 11 Claude skills for day trading: scan thousands of charts, track breaking news, time every entry and exit, and replay every outcome before you risk a dollar.
 
@@ -21,7 +26,7 @@ an order on its own. Paper trading is the default.
 > [github.com/Jakeschincariol/trader-skill](https://github.com/Jakeschincariol/trader-skill).
 > This repo is its day-trading sequel: the Trader skill v2.
 
-## Install
+## 📥 Install
 
 Paste this into Claude:
 
@@ -33,7 +38,7 @@ install skill
 
 Or as a plugin, in Claude Code:
 
-```
+```bash
 /plugin marketplace add Jakeschincariol/day-trader-skill
 /plugin install day-trader-skill@day-trader-skill
 ```
@@ -57,9 +62,9 @@ The tools need Python 3.8 or newer. Nothing to pip install. The SEC tools
 email in `trader/config.json` (`"sec_user_agent": "Your Name you@example.com"`)
 or in the `SEC_USER_AGENT` environment variable.
 
-## The eleven
+## 🛠️ The Eleven
 
-| command | job | what it does |
+| Command | Job | What It Does |
 | --- | --- | --- |
 | `/trader-scanner` | Chart Scanner | Scans thousands of charts for setups: opening-range breakouts, flags, oversold bounces. |
 | `/trader-news` | News Monitor | Tracks breaking news on every stock you watch and flags what moves it. |
@@ -73,7 +78,62 @@ or in the `SEC_USER_AGENT` environment variable.
 | `/trader-analyst` | Earnings Analyst | Reads earnings reports and sums up what changed. |
 | `/trader-pelosi` | Pelosi Tracker | Reads Congress's stock-trade disclosures the minute they are filed. |
 
-## How to use it
+## 🗺️ Skill Flow
+
+```text
+🔍 Scanner ──► 📰 News ──► ⏱️ Entry ──► 🎯 Exit / ⏳ Time Machine
+                                                   │
+🔔 Alerts ◄── 🤝 Broker ◄── 🛡️ Risk ◄── 💰 Budget ◄┘
+```
+
+```text
+┌─────────────────┐
+│   🔍 SCANNER    │  Scans 5,900+ US stocks for setups (ORB, flags, bounces)
+└────────┬────────┘
+         │
+         ▼
+┌────────┴────────┐
+│     📰 NEWS     │  Filters breaking news & SEC filings to avoid catalysts
+└────────┬────────┘
+         │
+         ▼
+┌────────┴────────┐
+│    ⏱️ ENTRY     │  Watches candles bar-by-bar to confirm exact breakout trigger
+└────────┬────────┘
+         │
+         ▼
+┌────────┴──────────────────────────────────────┐
+│          🎯 EXIT / ⏳ TIME MACHINE            │
+│  • Exit Planner : Sets stop-loss & 1R target  │
+│  • Time Machine : Runs 10,000 bar replays     │
+└────────┬──────────────────────────────────────┘
+         │
+         ▼
+┌────────┴────────┐
+│    💰 BUDGET    │  Sizes exact shares to your max dollar loss per trade
+└────────┬────────┘
+         │
+         ▼
+┌────────┴────────┐
+│     🛡️ RISK     │  Enforces daily loss limits, PDT rules & reward-to-risk
+└────────┬────────┘
+         │ [PASS]
+         ▼
+┌────────┴────────┐
+│    🤝 BROKER    │  Shows ticket in plain words; executes ONLY on your "yes"
+└────────┬────────┘
+         │ [ORDER PLACED]
+         ▼
+┌────────┴────────┐
+│    🔔 ALERTS    │  Rings on stop, target, and 3:55 PM market-close flatten
+└─────────────────┘
+
+Scheduled & Fundamental Analysis:
+• 📊 /trader-analyst ──► Quarterly financial statements, growth & EPS facts
+• 🏛️ /trader-pelosi  ──► Congressional stock trade disclosures (STOCK Act PTRs)
+```
+
+## 🚀 How to Use It
 
 Everything lands in a `trader/` folder in your project, and each skill reads
 what the last one wrote:
@@ -120,30 +180,42 @@ An example, the trade in the reel: Tesla, Monday October 19 2026, real data.
 9. **`/trader-alerts`** rings on the stop, the target and at 3:55 PM to
    flatten whatever is still open.
 
-## The tools
+## 💻 The Tools
 
 All standard-library Python. The data tools read public endpoints and are
 polite about it.
 
 ```bash
-python3 trader-scanner/scan.py universe                                # ~5,900 US stocks, Nasdaq Trader
-python3 trader-scanner/scan.py daily                                   # pre-market setups, whole universe
-python3 trader-scanner/scan.py orb --at 10:15                          # opening-range breakouts so far
-python3 trader-news/news.py --tickers TSLA --hours 12                  # headlines, 8-Ks, today's move
-python3 trader-entry/entry.py check TSLA --setup orb                   # waiting / triggered / expired
-python3 trader-entry/entry.py watch TSLA --every 30                    # bar by bar until it triggers
-python3 trader-exit/exit.py plan --stop or-mid --target 1R --write     # -> trader/plan.json
-python3 trader-timemachine/timemachine.py run --write                  # 10,000 replays + the history
-python3 trader-budget/size.py --write                                  # -> trader/orders.json
-python3 trader-risk/check.py                                           # PASS / BLOCK per order
-python3 trader-broker/ticket.py show                                   # the tickets, READY or not
-python3 trader-alerts/alerts.py add --from-plan                        # stop, target, flat by close
-python3 trader-alerts/alerts.py check                                  # rings what hit, once
-python3 trader-analyst/facts.py TSLA                                   # quarters, growth, EPS
-python3 trader-pelosi/ptr.py index --member pelosi                     # her PTRs this year
-```
+# --- 1. Market Scanning & Setup Discovery ---
+python3 trader-scanner/scan.py universe                                # Fetch ~5,900 US stock tickers from Nasdaq Trader
+python3 trader-scanner/scan.py daily                                   # Screen whole universe for pre-market setups
+python3 trader-scanner/scan.py orb --at 10:15                          # Scan for opening-range breakouts (ORB) up to 10:15
 
-```bash
+# --- 2. News & Filing Intelligence ---
+python3 trader-news/news.py --tickers TSLA --hours 12                  # Track breaking headlines, 8-K filings & today's price action
+
+# --- 3. Entry Timing & Confirmation ---
+python3 trader-entry/entry.py check TSLA --setup orb                   # Inspect trigger status: waiting / triggered / expired
+python3 trader-entry/entry.py watch TSLA --every 30                    # Stream & watch candles bar-by-bar until trigger fires
+
+# --- 4. Exit Planning & Simulation ---
+python3 trader-exit/exit.py plan --stop or-mid --target 1R --write     # Set midpoint stop & 1R target -> trader/plan.json
+python3 trader-timemachine/timemachine.py run --write                  # Run 10,000 Monte Carlo replays + historical base rates
+
+# --- 5. Budgeting & Risk Management ---
+python3 trader-budget/size.py --write                                  # Size exact shares to max loss limit -> trader/orders.json
+python3 trader-risk/check.py                                           # Enforce risk limits & PDT guard (PASS / BLOCK)
+
+# --- 6. Brokerage Execution & Alerts ---
+python3 trader-broker/ticket.py show                                   # Review plain-language order tickets (READY / not)
+python3 trader-alerts/alerts.py add --from-plan                        # Arm alerts: stop, target, and 3:55 PM market-close flatten
+python3 trader-alerts/alerts.py check                                  # Check active alerts and chime on triggered levels
+
+# --- 7. Fundamentals & Political Disclosures ---
+python3 trader-analyst/facts.py TSLA                                   # Parse quarterly SEC financial statements, growth & EPS
+python3 trader-pelosi/ptr.py index --member pelosi                     # Query Congressional stock transactions (STOCK Act PTRs)
+
+# --- Run Offline Test Suite ---
 python3 -m unittest discover -s tests -v
 ```
 
@@ -152,7 +224,7 @@ for the 60 days to October 19 2026, the 10:15 AM opening-range scan, Yahoo's
 TSLA headlines that morning, the House Clerk's 2026 index, real PTR text and
 real XBRL facts. They reproduce every number in the example above.
 
-## Fine print
+## ⚠️ Fine Print
 
 **Not financial advice.** This is software that reads public data and does
 arithmetic. It does not know your situation and it cannot see the future.
@@ -196,21 +268,20 @@ public filings the minute they post.
 **Taxes.** Day-trading gains are short-term gains, and frequent trading makes
 wash sales likely. Nothing here is tax advice.
 
-## Files
+## 📦 Modules
 
-```
-trader-scanner/     SKILL.md, scan.py
-trader-news/        SKILL.md, news.py
-trader-entry/       SKILL.md, entry.py
-trader-exit/        SKILL.md, exit.py
-trader-timemachine/ SKILL.md, timemachine.py
-trader-risk/        SKILL.md, check.py
-trader-budget/      SKILL.md, size.py, config.example.json, targets.example.json
-trader-broker/      SKILL.md, ticket.py, claude_desktop_config.example.json
-trader-alerts/      SKILL.md, alerts.py, alerts.example.json
-trader-analyst/     SKILL.md, facts.py, metrics.example.json
-trader-pelosi/      SKILL.md, ptr.py
-tests/              unittest suite + offline fixtures
-```
+| Module | Description | Link |
+| --- | --- | --- |
+| `trader-scanner` | Scan thousands of charts for setups | [README.md](trader-scanner/README.md) |
+| `trader-news` | Track breaking news on watched stocks | [README.md](trader-news/README.md) |
+| `trader-entry` | Bar-by-bar entry timer | [README.md](trader-entry/README.md) |
+| `trader-exit` | Plan stop, target and risk | [README.md](trader-exit/README.md) |
+| `trader-timemachine` | 10,000 replay simulations before risking a dollar | [README.md](trader-timemachine/README.md) |
+| `trader-budget` | Position sizing | [README.md](trader-budget/README.md) |
+| `trader-risk` | Order risk gate | [README.md](trader-risk/README.md) |
+| `trader-broker` | Order tickets | [README.md](trader-broker/README.md) |
+| `trader-alerts` | Price alerts | [README.md](trader-alerts/README.md) |
+| `trader-analyst` | Fundamental facts | [README.md](trader-analyst/README.md) |
+| `trader-pelosi` | Congressional trade disclosures | [README.md](trader-pelosi/README.md) |
 
 MIT. Made by [Jake Schincariol](https://opusjake.ai).
